@@ -9,7 +9,7 @@
   
   inputs.src-shell-v0_1_2.flake = false;
   inputs.src-shell-v0_1_2.owner = "Vindaar";
-  inputs.src-shell-v0_1_2.ref   = "refs/tags/v0.1.2";
+  inputs.src-shell-v0_1_2.ref   = "v0_1_2";
   inputs.src-shell-v0_1_2.repo  = "shell";
   inputs.src-shell-v0_1_2.type  = "github";
   
