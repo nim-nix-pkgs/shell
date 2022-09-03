@@ -1,0 +1,556 @@
+* shell
+[[https://travis-ci.org/Vindaar/shell][https://travis-ci.org/Vindaar/shell.svg?branch=master]]
+
+A mini Nim DSL to execute shell commands more conveniently.
+
+** Usage
+With this macro you can simply write
+#+BEGIN_SRC nim
+shell:
+  touch foo
+  mv foo bar
+  rm bar
+#+END_SRC
+which is then rewritten to something equivalent to:
+#+BEGIN_SRC nim
+execShell("touch foo")
+execShell("mv foo bar")
+execShell("rm bar")
+#+END_SRC
+where =execShell= is a proc around =startProcess= for normal
+compilation and =gorgeEx= when using NimScript.
+
+Note: When using =NimScript= the given command is prepended by
+#+BEGIN_SRC
+&"cd {getCurrentDir()} && "
+#+END_SRC
+in order to switch the evaluation into the directory of the =shell=
+call.
+The same is achieved on the compiled backend by the =poEvalCommand=
+argument to =startProcess=.
+
+See [[Full expansion of the macro]] below for more details and how to read
+the exit code of executed commands.
+
+Most simple things should work as expected. See below for some known
+quirks.
+
+** ~one~ and ~pipe~
+
+By default each line in the =shell= macro will be handled by a
+different call to =execShell=. If you need several commands, which
+depend on the state of the previous, you may do so via the =one=
+command like so:
+#+BEGIN_SRC nim
+shell:
+  one:
+    mkdir foo
+    cd foo
+    touch bar
+    cd ".."
+    rm foo/bar
+#+END_SRC
+
+Similar to the =one= command, the =pipe= command exists. This concats
+the command via the shell pipe =|=:
+#+BEGIN_SRC nim
+shell:
+  pipe:
+    cat test.txt
+    head -3
+#+END_SRC
+will produce:
+#+BEGIN_SRC nim
+execShell("cat test.txt | head -3")
+#+END_SRC
+
+Both of these can even be combined!
+#+BEGIN_SRC nim
+shell:
+  one:
+    mkdir foo
+    pushd foo
+    echo "Hallo\nWorld" > test.txt
+    pipe:
+      cat test.txt
+      grep H
+    popd
+    rm foo/test.txt
+    rmdir foo
+#+END_SRC
+will work just as expected, echoing =Hallo= in the shell.
+
+** Nim symbol quoting
+
+*NOTE:* In a previous version this was done via accented quotes
+=`=. For the old behavior compile with =-d:oldQuote=.
+
+Another important feature to make this library useful is quoting of
+Nim symbols.
+
+This is handled via parenthesis =()= (if you need to run something in
+a subshell unfortunately that will have to be done with an explicit
+string now). Any tree in =()= is subject to quoting. That means if an
+identifier within =()= is preceded by a =$=, the symbol is
+unquoted. Note however that for the moment only a single variable may
+be quoted in each =()=.
+
+The simplest case would be:
+#+BEGIN_SRC nim
+let name = "Vindaar"
+shell:
+  echo Hello from ($name)
+#+END_SRC
+which will perform the call:
+#+BEGIN_SRC nim
+execShell(&"echo Hello from {name}!")
+#+END_SRC
+and after the call to =strformat.&=:
+#+BEGIN_SRC nim
+execShell("echo Hello from Vindaar!")
+#+END_SRC
+
+*** Appending to a Nim identifier
+
+Assuming we have a filename identifier and we want to convert some
+image from =png= to =jpg= with image magick. The simplest command
+should look like:
+#+BEGIN_SRC sh
+convert myimage.png myimage.jpg
+#+END_SRC
+
+This can be done in several ways.
+
+**** Using dot expressions and no string literals:
+#+BEGIN_SRC nim
+let fname = "myimage"
+shell:
+  convert ($fname).png ($fname).jpg
+#+END_SRC
+Note that this is a special case. Continuing after a =()= quote
+without literal strings will only work for dot expressions. For
+instance:
+#+BEGIN_SRC nim
+let fname = "myimage"
+shell:
+  convert ($fname)".png" ($fname)".jpg"
+#+END_SRC
+will wrongly be converted to:
+#+BEGIN_SRC sh
+convert myimage .png myimage .jpg
+#+END_SRC
+which is obviously not what one would expect.
+
+**** Using string literals:
+#+BEGIN_SRC nim
+let fname = "myimage"
+shell:
+  convert ($fname".pdf") ($fname".png")
+#+END_SRC
+In contrast to the wrong example shown above, this will work as
+expected.
+
+This is especially useful for cases without dot expressions after the
+quoted nim identifier.
+
+*** Appending a Nim identifier to a string literal
+
+The other example would be appending a Nim identifier to a literal
+string. For instance in case we have a filename, which we create at
+run time and we wish to hand it to some command which takes an
+argument, which is must be given without a space like:
+#+BEGIN_SRC sh
+./myBin input --out=output
+#+END_SRC
+
+In this case one of the following ways works:
+
+**** using =()= after a string literal:
+#+BEGIN_SRC nim
+let outfile = "myoutput.txt"
+shell:
+  ./myBin input "--out="($outfile)
+#+END_SRC
+If the =()= appears after the literal we can correctly generate the
+string without a space (in comparison to the case presented above when
+a string literal follows a =()=).
+
+**** For more predictable behavior, put the string literal also into
+   =()=:
+#+BEGIN_SRC nim
+let outfile = "myoutput.txt"
+shell:
+  ./myBin input ("--out="$outfile)
+#+END_SRC
+
+*** General remark on predictability
+
+*NOTE:* previously this section said to handle quoting + concatenation
+with strings both in the case of with and without space with =()= for
+the most predictable behavior. But that was a bad idea from my side!
+If you need spaces, simply put it outside the =()= and use a space!
+
+The =doAssert= below is to be understood in the context of the =shell=
+macro. To summarize the above then:
+#+BEGIN_SRC nim
+let outfile = "myoutput.txt"
+doAssert ("--out="$outfile) == &"--out={outfile}" # <- without space, ident after
+doAssert "--out" ($outfile) == &"--out {outfile}" # <- with space, ident after
+let fname = "myimage"
+doAssert ($outfile".jpg") == &"{fname}.jpg" # <- without space, ident first
+doAssert ($outfile) "image2" == &"{outfile} image2" # <- without space, ident first
+#+END_SRC
+
+*NOTE 2:* For the moment however, the =()= usage is restricted to a
+single string literal (or something that is convertible to a string
+via the =stringify= proc) and a single Nim identifier! This
+restriction will maybe be removed in the future.
+
+This syntax also works for more complicated Nim expressions than a
+simple identifier:
+#+BEGIN_SRC nim
+const t = (a: "name", b: 5.5)
+doAssert ("--out="$(t.a))
+doAssert ("--out="$t.a)
+#+END_SRC
+both work. Of course =t= needn't be a tuple. It can also be an object
+or even a function call, like for instance extracting a filename
+within a call:
+#+BEGIN_SRC nim
+import os, shell
+let path = "/some/user/path/toAFile.txt"
+shell:
+  ./myBin ("--inputFile="$(path.extractFilename))
+#+END_SRC
+should produce:
+#+BEGIN_SRC sh
+./myBin --inputFile=toAFile.txt
+#+END_SRC
+
+** Accented quotes
+
+*NOTE*: In a previous version accented quotes were also used to quote
+Nim identifiers. That use case is now handled via parentheses. For the
+old behavior compile with =-d:oldQuote=.
+
+Accented quotes allow you to hand raw strings.
+
+Note: this has the downside of disallowing =`= as a token to be handed
+to the shell. If you want to use the shell's =`=, you need to put the
+appropriate command into quotation marks.
+
+*** Raw strings
+If you want to hand a literal string to the shell, you may do so by
+putting it into accented quotes:
+#+BEGIN_SRC nim
+echo `hello`
+#+END_SRC
+will be rewritten to
+#+BEGIN_SRC nim
+execShell("echo \"hello\"")
+#+END_SRC
+
+For a string consisting of multiple commands / words, put quotation
+marks around it:
+#+BEGIN_SRC sh
+echo `"Hello from Nim!"`
+#+END_SRC
+which will then also be rewritten to:
+#+BEGIN_SRC nim
+execShell("echo \"Hello from Nim!\"")
+#+END_SRC
+
+
+** Assignment of results to Nim variables
+
+Also useful is assignment of the result of a shell call to a Nim
+string. This can be done with the =shellAssign= macro. It is a little
+special compared to the =shell= and =shellEcho= macros. It only
+supports a single statement (*), which needs to be an assignment of a
+shell call of the syntax presented above to a Nim variable, such as:
+#+BEGIN_SRC nim
+var name = ""
+shellAssign:
+  name = echo Araq
+assert name == "Araq"
+#+END_SRC
+Here the left =name= is the Nim variable (note: this is an exception
+of the Nim symbol quoting mentioned above!), whereas the right hand
+side is an arbitrary shell call, in this case a simple call to
+=echo=. The Nim variable will be assigned the result of the shell
+call, by being rewritten to:
+#+BEGIN_SRC nim
+var name = ""
+name = asgnShell("echo Araq")
+assert name == "Araq"
+#+END_SRC
+=asgnShell= is internally called by =execShell= mentioned
+above. =asgnShell= itself performs the calls to =execCmdEx= (or =exec=
+for NimScript).
+
+(*): a single statement is not entirely precise, because the =one= and
+=pipe= operators can be used in combination with the assignment! For
+example the following is also possible:
+#+BEGIN_SRC nim
+var res = ""
+shellAssign:
+  res = pipe:
+    seq 0 1 10
+    tail -3
+assert res == "8\n9\n10"
+#+END_SRC
+
+
+** NimScript
+
+This macro can also be used in NimScript! Instead of =execCmdEx= the
+=nimscript.exec= is used.
+
+** Known issues
+
+Certain things unfortunately *have* to go into quotation marks. As
+seen in the =one= example above, the simple =..= is not allowed.
+
+Variable assignments in the shell need to be handed via a string
+literal:
+#+BEGIN_SRC nim
+shell:
+  one:
+    "a=`echo hello`"
+    echo $a
+#+END_SRC
+
+Also if you need assignment via `:`, you need to also put it into quotation
+marks, as the Nim tree is not unambiguous enough to properly parse the
+resulting command. Say you wish to compile a Nim program, you might want to do:
+#+BEGIN_SRC nim
+shell:
+  nim c "--out:noTest" test.nim
+#+END_SRC
+
+A slightly different case is assignment via `=`. A single `=`
+assignment in a command is possible, but not more. That is due to a
+Nim parser limitation (as you cannot have "nested" `nnkAsgn` nodes).
+
+So this:
+#+begin_src sh
+shel:
+  foo --bar --option=value --more
+#+end_src
+is fine, but this:
+#+begin_src sh
+shell:
+  foo --bar --option=value --secondOption=value2
+#+end_src
+is *not* valid Nim syntax. Fortunately, in most cases the `=` sign is
+optional anyway and you may just drop (one or both):
+#+begin_src sh
+shel:
+  foo --bar --option value --secondOption value2
+#+end_src
+is valid and means the same for most programs.
+
+In general, if in doubt you can just write strings or triple string
+(to pass a ="= to the shell).
+
+** Full expansion of the macro
+
+As mentioned at the top of the README, the expansion shown is
+simplified (as a matter of fact it was as simple once, but has since
+become more complex).
+
+The full expansion of the first example is:
+#+BEGIN_SRC nim
+discard block:
+  var outputStr381052 = ""
+  var exitCode381051: int
+  if exitCode381051 ==
+      0:
+    let tmp381063 = execShell("touch foo")
+    outputStr381052 = outputStr381052 &
+        tmp381063[0]
+    exitCode381051 = tmp381063[1]
+  else:
+    echo "Skipped command `" & "touch foo" &
+        "` due to failure in previous command!"
+  if exitCode381051 ==
+      0:
+    let tmp381064 = execShell("mv foo bar")
+    outputStr381052 = outputStr381052 &
+        tmp381064[0]
+    exitCode381051 = tmp381064[1]
+  else:
+    echo "Skipped command `" & "mv foo bar" &
+        "` due to failure in previous command!"
+  if exitCode381051 ==
+      0:
+    let tmp381065 = execShell("rm bar")
+    outputStr381052 = outputStr381052 &
+        tmp381065[0]
+    exitCode381051 = tmp381065[1]
+  else:
+    echo "Skipped command `" & "rm bar" &
+        "` due to failure in previous command!"
+  (outputStr381052, exitCode381051)
+#+END_SRC
+
+As can be seen from the expansion above, successive commands are only
+run, if the exit code of the previous command was 0, while the output
+is appended to the previous command's output.
+
+The normal =shell= command discards the return value of the block. If
+you want to keep it, use the =shellVerbose= macro:
+#+BEGIN_SRC nim
+let res = shellVerbose:
+  someCommand
+#+END_SRC
+where =res= will be of type =tuple[output: string, exitCode: string]=
+according to the expansion above.
+
+** Debugging
+In order to see what's going on, you can either compile your program
+with the =-d:debugShell= flag, which will then echo the rewritten
+commands during compilation.
+Alternatively in order to avoid calling the commands immediately, you
+may use the =shellEcho= macro instead. It simply echoes the commands
+that would otherwise be run.
+
+** Error reporting
+
+By default ~shell~ prints output messages to stdout:
+
+#+BEGIN_SRC nim :exports both :results scalar
+import shell
+
+shell:
+  ls
+#+END_SRC
+
+#+RESULTS:
+: shellCmd: ls
+: shell> nim.cfg
+: shell> README.org
+: shell> shell
+: shell> shell.nim
+: shell> shell.nim.bin
+: shell> shell.nimble
+: shell> tests
+
+What is printed to stdout can be configured by using defines:
+
+- ~shellNoDebugOutput~ :: Do not print command output
+- ~shellNoDebugError~ :: Do not print error output
+- ~shellNoDebugCommand~ :: Do not print command being executed
+- ~shellNoDebugRuntime~ :: When error occurs do not print failed command
+
+By default these are disabled - to enable use either
+~-d:shellNoDebug*~ or use the ~{.define(shellNoDebug*).}~ pragma
+
+#+BEGIN_SRC nim :exports both :results scalar
+{.define(shellNoDebugOutput).}
+
+import shell
+
+shell:
+  ls
+#+END_SRC
+
+#+RESULTS:
+: shellCmd: ls
+
+The default ~shellVerbose~ command combines stderr and stdout into
+single result. To get =stdout=, =stderr= and the return code
+separately use ~shellVerboseErr~. Both of these templates have an
+overload that takes ~set[DebugOutputKind]~ to control printing
+settings:
+
+#+BEGIN_SRC nim :exports both :results scalar
+import shell
+
+let (res, err, code) = shellVerboseErr {dokCommand}:
+  echo "test"
+
+echo "Returned string: '", res, "' with exit code ", code
+
+#+END_SRC
+
+#+RESULTS:
+: shellCmd: echo test
+: Returned string: 'test' with exit code 0
+
+Printing errors directly into stdout is good solution for most of the
+use cases, but sometimes it is necessary to provide more sophisticated
+error handing - throwing an exception when the command failed. To
+switch to exceptions use ~-d:shellThrowException~. It will
+automatically disable all other output types in the default
+configuration.
+
+#+begin_src nim :exports both :results scalar
+{.define(shellThrowException).}
+
+import shell, strutils
+
+try:
+  shell:
+    ls -l
+    ls -z
+except ShellExecError:
+  let e = cast[ShellExecError](getCurrentException())
+  echo e.msg # Error message describing what happened
+  echo "command was: ", e.cmd # Original command string
+  assert e.cmd == "ls -z"
+  echo "return code: ", e.retcode # Return code
+  echo "regular out: ", e.outstr # Stdout from command
+  echo "error outpt: "
+  for l in e.errstr.split('\n'): # Stderr from the command
+    echo "  ", l
+#+end_src
+
+#+RESULTS:
+: Command ls -z exited with non-zero code
+: command was: ls -z
+: return code: 2
+: regular out:
+: error outpt:
+:   ls: invalid option -- 'z'
+:   Try 'ls --help' for more information.
+
+On command failure ~ShellExecError~ is raised.
+
+Note that some commands output error messages into ~stdout~ rather
+than into ~stderr~ - it might be necessary to check both. In this
+particular example content of the ~stderr~ is largely meaningless:
+actual reason for error was printed into ~stdout~.
+
+#+begin_src nim :exports both :results scalar
+{.define(shellThrowException).}
+
+import shell, strutils
+
+try:
+  shell:
+    ngspice -b "/tmp/ngpsice-simulation/zzz.netkRs8jE"
+except ShellExecError:
+  let e = cast[ShellExecError](getCurrentException())
+  echo e.msg # Error message describing what happened
+  echo "command was: ", e.cmd # Original command string
+  echo "exec direct: ", e.cwd # 
+  echo "return code: ", e.retcode # Return code
+  echo "regular out: \n====\n", e.outstr # Stdout from command
+  echo "====\nerror outpt: \n====\n", e.errstr # Stderr from the command
+#+end_src
+
+#+RESULTS:
+#+begin_example
+Command ngspice -b /tmp/ngpsice-simulation/zzz.netkRs8jE exited with non-zero code
+command was: ngspice -b /tmp/ngpsice-simulation/zzz.netkRs8jE
+exec direct: /home/test/workspace/git-sandbox/shell
+return code: 1
+regular out: 
+====
+
+====
+error outpt: 
+====
+/tmp/ngpsice-simulation/zzz.netkRs8jE: No such file or directory
+#+end_example
